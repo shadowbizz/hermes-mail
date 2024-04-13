@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/cli", 
+  "crates/mailer",
+]
+default_members = [
+  "crates/cli",
+]
+
+[workspace.package]
+authors = ["devsheke <abhi@sheke.tech>"]
+description = "A suite of powerful email tools"
+homepage = "https://github.com/devsheke/hermes-mail"
+repository = "https://github.com/devsheke/hermes-mail"
+categories = ["mail-tools", "command-line"]
+license = "GNU GPLv3.0"
+rust-version = "1.77.1"
