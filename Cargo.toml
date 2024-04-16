@@ -14,5 +14,5 @@ description = "A suite of powerful email tools"
 homepage = "https://github.com/devsheke/hermes-mail"
 repository = "https://github.com/devsheke/hermes-mail"
 categories = ["mail-tools", "command-line"]
-license = "GNU GPLv3.0"
+license = "Apache-2.0 License"
 rust-version = "1.77.1"
