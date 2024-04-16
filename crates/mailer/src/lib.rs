@@ -1,14 +1,7 @@
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
+//! hermes-mailer is the core library utilised by hermes in order to transport
+//! email messages in bulk. This library implements a highly configurable mail 
+//! transport queue in order to send emails.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub mod data;
+pub mod queue;
+pub(crate) mod stats;
