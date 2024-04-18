@@ -10,7 +10,7 @@ default_members = [
 
 [workspace.package]
 authors = ["devsheke <abhi@sheke.tech>"]
-description = "A powerful mail-transport-agent written in rust"
+description = "A cross-platform, robust and highly configurable mail-transport-agent for the command-line"
 homepage = "https://github.com/devsheke/hermes-mail"
 repository = "https://github.com/devsheke/hermes-mail"
 categories = ["mail-tools", "command-line"]

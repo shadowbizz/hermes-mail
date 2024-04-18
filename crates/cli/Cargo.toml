@@ -2,7 +2,7 @@
 name = "hermes-cli"
 version = "0.1.0"
 edition = "2021"
-description = "A crosst-platform, robust and highly configurable mail-transport-agent for the command-line"
+description.workspace = true
 authors.workspace = true
 license.workspace = true
 rust-version.workspace = true
