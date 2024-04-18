@@ -62,9 +62,9 @@ where
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("for file: {file}; err: {err}")]
+    #[error("for file: '{file}'; err: {err}")]
     IOError { file: PathBuf, err: io::Error },
-    #[error("for source: {src}; err: {err}")]
+    #[error("for source: '{src}'; err: {err}")]
     TemplateError { src: String, err: TemplateError },
 }
 

@@ -10,7 +10,9 @@ use std::{
     cmp::Ordering,
     collections::HashMap,
     env,
+    num::ParseIntError,
     path::PathBuf,
+    str::FromStr,
     sync::Arc,
     thread::{self, JoinHandle},
 };
@@ -22,9 +24,36 @@ pub mod task;
 type Senders = Vec<Arc<Sender>>;
 type Receivers = Vec<Arc<Receiver>>;
 
+#[derive(Debug, Clone)]
+pub struct CodesVec {
+    data: Vec<u16>,
+}
+
+impl Default for CodesVec {
+    fn default() -> Self {
+        Self { data: Vec::new() }
+    }
+}
+
+impl FromStr for CodesVec {
+    type Err = ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() {
+            return Ok(CodesVec::default());
+        }
+        let data = s
+            .split(',')
+            .map(|s| s.parse::<u16>())
+            .collect::<Result<Vec<u16>, ParseIntError>>()?;
+
+        Ok(CodesVec { data })
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum BuildError {
-    #[error("for file: {file}; err: {err}")]
+    #[error("for file: '{file}'; err: {err}")]
     CSVError { file: PathBuf, err: csv::Error },
     #[error("queue is missing field: '{0}'")]
     MissingFieldError(String),
@@ -40,7 +69,7 @@ pub struct Builder {
     daily_limit: u32,
     skip_weekends: bool,
     skip_permanent: bool,
-    skip_codes: Vec<i16>,
+    skip_codes: Vec<u16>,
 }
 
 impl Default for Builder {
@@ -98,8 +127,8 @@ impl Builder {
         self
     }
 
-    pub fn skip_codes(mut self, codes: Vec<i16>) -> Self {
-        self.skip_codes = codes;
+    pub fn skip_codes(mut self, codes: CodesVec) -> Self {
+        self.skip_codes = codes.data;
         self.skip_codes.sort();
         self
     }
@@ -178,7 +207,7 @@ pub struct Queue {
     stats: HashMap<String, Stats>,
     skip_weekends: bool,
     skip_permanent: bool,
-    skip_codes: Vec<i16>,
+    skip_codes: Vec<u16>,
     rate: Duration,
     daily_limit: u32,
     workers: u8,
@@ -278,7 +307,7 @@ impl Queue {
                             stats.skip();
                             stats.inc_bounced(1);
                         }
-                        match Queue::_code_to_int(err.status()) {
+                        match Queue::code_to_int(err.status()) {
                             Some(code) => {
                                 if self.skip_codes.binary_search(&code).is_ok() {
                                     stats.skip();
@@ -450,12 +479,12 @@ impl Queue {
             .unwrap_or_else(|e| warn!(msg = "could not save failures", error = format!("{e}")));
     }
 
-    fn _code_to_int(code: Option<Code>) -> Option<i16> {
+    fn code_to_int(code: Option<Code>) -> Option<u16> {
         match code {
             None => None,
             Some(code) => {
                 let (s, b, d) = (code.severity, code.category, code.detail);
-                let code = (s as i16) * 100 + (b as i16) * 10 + (d as i16);
+                let code = (s as u16) * 100 + (b as u16) * 10 + (d as u16);
                 Some(code)
             }
         }

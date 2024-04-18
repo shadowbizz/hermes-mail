@@ -2,9 +2,15 @@
 name = "hermes-cli"
 version = "0.1.0"
 edition = "2021"
-description = "A command-line tool for complex email operations"
+description = "A crosst-platform, robust and highly configurable mail-transport-agent for the command-line"
 authors.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+clap = { version = "4.5.4", features = ["derive"] }
+console = "0.15.8"
+hermes-mailer = { path = "../mailer" }
+tracing = "0.1.40"
+tracing-appender = "0.2.3"
+tracing-subscriber = { version = "0.3.18", features = ["json", "chrono"] }
