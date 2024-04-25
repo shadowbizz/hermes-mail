@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/cli", 
   "crates/mailer",
+  "crates/csv"
 ]
 default_members = [
   "crates/cli",

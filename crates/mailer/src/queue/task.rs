@@ -54,7 +54,7 @@ impl Task {
         })?;
 
         let templates = sender.templates.as_ref().unwrap();
-        let variables = receiver.variables.as_ref().unwrap_or(&empty);
+        let variables = &receiver.variables.as_ref().unwrap_or(&empty).0;
 
         let mut builder = Message::builder()
             .from(sender.email.parse().map_err(|err| Error::AddressError {

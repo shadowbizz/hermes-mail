@@ -8,57 +8,9 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
-
-pub type TemplateVariables = HashMap<String, String>;
-
-fn serialize_template_vars<S>(
-    vars: &Option<TemplateVariables>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    match vars {
-        Some(v) => serializer.serialize_str(
-            &v.iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<String>>()
-                .join(";"),
-        ),
-        None => serializer.serialize_str(""),
-    }
-}
-
-fn deserialize_template_vars<'de, D>(deserializer: D) -> Result<Option<TemplateVariables>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s: &str = Deserialize::deserialize(deserializer)?;
-    if s.is_empty() {
-        return Ok(None);
-    }
-
-    let map: Result<HashMap<String, String>, D::Error> = s
-        .split(';')
-        .map(|s| {
-            if let Some(pos) = s.find('=') {
-                let (key, val) = s.split_at(pos);
-                Ok((key.to_string(), val[1..val.len()].to_string()))
-            } else {
-                Err(D::Error::custom(format!(
-                    "expected: key=value pairs; got: \"{s}\""
-                )))
-            }
-        })
-        .collect();
-
-    match map {
-        Ok(m) => Ok(Some(m)),
-        Err(e) => Err(e),
-    }
-}
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -66,6 +18,65 @@ pub enum Error {
     IOError { file: PathBuf, err: io::Error },
     #[error("for source: '{src}'; err: {err}")]
     TemplateError { src: String, err: TemplateError },
+    #[error("expected: key=value pairs for variables; got: {data}")]
+    TemplateVariableParseError { data: String },
+}
+
+#[derive(Debug, PartialEq)]
+pub struct TemplateVariables(pub HashMap<String, String>);
+
+impl Default for TemplateVariables {
+    fn default() -> Self {
+        TemplateVariables(HashMap::new())
+    }
+}
+
+impl FromStr for TemplateVariables {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(
+            s.split(';')
+                .map(|s| {
+                    if let Some(pos) = s.find('=') {
+                        let (key, val) = s.split_at(pos);
+                        Ok((key.to_string(), val[1..val.len()].to_string()))
+                    } else {
+                        Err(Error::TemplateVariableParseError {
+                            data: s.to_string(),
+                        })
+                    }
+                })
+                .collect::<Result<HashMap<String, String>, Error>>()?,
+        ))
+    }
+}
+
+impl Serialize for TemplateVariables {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(
+            &self
+                .0
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<String>>()
+                .join(";"),
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for TemplateVariables {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s: &str = Deserialize::deserialize(deserializer)?;
+
+        Ok(Self::from_str(s).map_err(D::Error::custom)?)
+    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -74,14 +85,22 @@ pub struct Receiver {
     pub cc: Option<Mailboxes>,
     pub bcc: Option<Mailboxes>,
     pub sender: String,
-    #[serde(
-        serialize_with = "serialize_template_vars",
-        deserialize_with = "deserialize_template_vars"
-    )]
     pub variables: Option<TemplateVariables>,
 }
 
-#[derive(Debug, Deserialize)]
+impl Default for Receiver {
+    fn default() -> Self {
+        Self {
+            email: "".into(),
+            sender: "".into(),
+            cc: None,
+            bcc: None,
+            variables: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Sender {
     pub email: String,
     pub secret: String,
@@ -91,8 +110,24 @@ pub struct Sender {
     pub read_receipt: Option<String>,
     pub plain: PathBuf,
     pub html: Option<PathBuf>,
-    #[serde(skip_deserializing)]
+    #[serde(skip_serializing, skip_deserializing)]
     pub templates: Option<Handlebars<'static>>,
+}
+
+impl Default for Sender {
+    fn default() -> Self {
+        Self {
+            email: "".into(),
+            secret: "".into(),
+            subject: "".into(),
+            host: "".into(),
+            auth: Mechanism::Plain,
+            read_receipt: None,
+            plain: PathBuf::new(),
+            html: None,
+            templates: None,
+        }
+    }
 }
 
 impl Sender {
@@ -234,10 +269,10 @@ mod tests {
                 cc: Some(Mailboxes::from_str("mark@example.com,sarah@example.com").unwrap()),
                 bcc: Some(Mailboxes::from_str("emma@example.com,john@example.com").unwrap()),
                 sender: "sarah.wilson@example.com".into(),
-                variables: Some(HashMap::from([
+                variables: Some(TemplateVariables(HashMap::from([
                     ("name".to_string(), "Tom".to_string()),
                     ("location".to_string(), "Berlin".to_string())
-                ]))
+                ])))
             }
             .into()
         );

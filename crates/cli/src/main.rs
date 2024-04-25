@@ -16,10 +16,15 @@ fn main() {
     let cmd = cmd::Cmd::parse();
 
     let (res, guard) = match cmd.command {
-        cmd::Commands::Send(args) => (args.send(), init_logger()),
+        cmd::Commands::Send(args) => (args.send(), Some(init_logger())),
+        cmd::Commands::Convert(args) => (args.convert(), None),
     };
 
-    let _guard = guard.unwrap_or_else(|e| print_error(e));
+    let _guard = match guard {
+        Some(g) => Some(g.unwrap_or_else(|e| print_error(e))),
+        None => None,
+    };
+
     res.unwrap_or_else(|e| print_error(e));
 }
 

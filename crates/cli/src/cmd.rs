@@ -1,5 +1,8 @@
 use clap::{ArgAction::SetTrue, Args, Parser, Subcommand};
+use dialoguer::{Confirm, Input, MultiSelect, Select};
+use hermes_csv::{Reader, ReceiverHeaderMap, SenderHeaderMap};
 use hermes_mailer::queue::{Builder, CodesVec};
+use lettre::transport::smtp::authentication::Mechanism;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -14,6 +17,8 @@ pub struct Cmd {
 pub enum Commands {
     /// Send emails
     Send(SendCommand),
+    /// Convert CSV file to the Hermes format
+    Convert(ConvertCommand),
 }
 
 #[derive(Args)]
@@ -75,5 +80,197 @@ impl SendCommand {
         q.run()?;
 
         Ok(())
+    }
+}
+
+#[derive(Args)]
+pub struct ConvertCommand {
+    /// Convert CSV to Receiver format
+    #[arg(required = true, conflicts_with("senders"), short, long)]
+    pub receivers: bool,
+    /// Convert CSV to Sender format
+    #[arg(required = true, conflicts_with("receivers"), short, long)]
+    pub senders: bool,
+    /// Path to input file
+    pub file: PathBuf,
+    /// Sets the output file
+    pub output: Option<PathBuf>,
+    /// Sanitize the input file by removing all non UTF-8 characters
+    #[arg(short = 'S', long)]
+    pub sanitize: bool,
+}
+
+impl ConvertCommand {
+    fn receiver_prompt(self, mut reader: Reader) -> Result<(), super::Error> {
+        let mut map = ReceiverHeaderMap::new();
+
+        map = map.email(
+            Select::new()
+                .with_prompt("Pick field with receivers")
+                .items(&reader.headers)
+                .interact()
+                .unwrap(),
+        );
+
+        if let Some(pos) = Select::new()
+            .with_prompt("Pick field with senders (optional)")
+            .items(&reader.headers)
+            .interact_opt()
+            .unwrap()
+        {
+            map = map.sender(pos)
+        }
+
+        if let Some(pos) = MultiSelect::new()
+            .with_prompt("Pick fields with Cc (optional)")
+            .items(&reader.headers)
+            .interact_opt()
+            .unwrap()
+        {
+            map = map.cc(pos)
+        }
+
+        if let Some(pos) = MultiSelect::new()
+            .with_prompt("Pick fields with Bcc (optional)")
+            .items(&reader.headers)
+            .interact_opt()
+            .unwrap()
+        {
+            map = map.bcc(pos)
+        }
+
+        if let Some(pos) = MultiSelect::new()
+            .with_prompt("Pick fields with variables")
+            .items(&reader.headers)
+            .interact_opt()
+            .unwrap()
+        {
+            map = map.variables(pos)
+        }
+
+        reader.convert_receivers(map, self.output)
+    }
+
+    fn mechanism_fromstr(s: &str) -> Result<Mechanism, String> {
+        match s.to_lowercase().trim() {
+            "plain" => Ok(Mechanism::Plain),
+            "login" => Ok(Mechanism::Login),
+            "xoauth2" => Ok(Mechanism::Xoauth2),
+            &_ => Err(format!("unknown mechanism: {s}")),
+        }
+    }
+
+    fn sender_prompt(self, mut reader: Reader) -> Result<(), super::Error> {
+        let mut map = SenderHeaderMap::new();
+
+        map = map.email(
+            Select::new()
+                .with_prompt("Pick the field with senders")
+                .items(&reader.headers)
+                .interact()
+                .unwrap(),
+        );
+
+        map = map.secret(
+            Select::new()
+                .with_prompt("Pick the field with passwords")
+                .items(&reader.headers)
+                .interact()
+                .unwrap(),
+        );
+
+        if Confirm::new()
+            .with_prompt("Do you want to set the same SMTP host for all senders?")
+            .interact()
+            .unwrap()
+        {
+            map = map.global_host(
+                Input::new()
+                    .with_prompt("SMTP host address")
+                    .interact_text()
+                    .unwrap(),
+            )
+        } else {
+            if let Some(host) = Select::new()
+                .with_prompt("Pick the field with SMTP hosts")
+                .items(&reader.headers)
+                .interact_opt()
+                .unwrap()
+            {
+                map = map.host(host)
+            }
+        }
+
+        if Confirm::new()
+            .with_prompt("Do you want to set the same subject for all senders?")
+            .interact()
+            .unwrap()
+        {
+            map = map.global_subject(
+                Input::new()
+                    .with_prompt("Email subject")
+                    .interact_text()
+                    .unwrap(),
+            )
+        } else {
+            if let Some(host) = Select::new()
+                .with_prompt("Pick the field with the subjects")
+                .items(&reader.headers)
+                .interact_opt()
+                .unwrap()
+            {
+                map = map.subject(host)
+            }
+        }
+
+        if Confirm::new()
+            .with_prompt("Do you want to set the same read-receipt receiver for all senders?")
+            .interact()
+            .unwrap()
+        {
+            map = map.global_read_receipts(
+                Input::new()
+                    .with_prompt("Read-receipt receiver email address")
+                    .interact_text()
+                    .unwrap(),
+            )
+        } else {
+            if let Some(read_receipts) = Select::new()
+                .with_prompt("Pick the field with read-receipt receiver email addresses")
+                .items(&reader.headers)
+                .interact_opt()
+                .unwrap()
+            {
+                map = map.read_receipts(read_receipts)
+            }
+        }
+
+        if Confirm::new()
+            .with_prompt("Do you want to set the login mechanism for all senders?")
+            .interact()
+            .unwrap()
+        {
+            let mechanism: String = Input::new()
+                .with_prompt("SMTP AUTH mechanism")
+                .interact_text()
+                .unwrap();
+            map = map.global_auth(ConvertCommand::mechanism_fromstr(&mechanism)?);
+        }
+
+        reader.convert_senders(map, self.output)
+    }
+
+    pub(crate) fn convert(self) -> Result<(), super::Error> {
+        let reader = if self.sanitize {
+            Reader::new_sanitized(&self.file).unwrap()
+        } else {
+            Reader::new(&self.file).unwrap()
+        };
+
+        if self.receivers {
+            self.receiver_prompt(reader)
+        } else {
+            self.sender_prompt(reader)
+        }
     }
 }
