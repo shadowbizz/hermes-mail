@@ -3,13 +3,14 @@ use crate::{
     stats::Stats,
 };
 use chrono::{DateTime, Datelike, Duration, Local, Timelike};
+use indicatif::ProgressStyle;
 use lettre::transport::smtp::response::Code;
 use rand::{seq::SliceRandom, thread_rng};
 use serde::Serialize;
 use std::{
     cmp::Ordering,
     collections::HashMap,
-    env,
+    env::{self, args},
     num::ParseIntError,
     path::PathBuf,
     str::FromStr,
@@ -17,7 +18,8 @@ use std::{
     thread::{self, JoinHandle},
 };
 use thiserror::Error;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, info_span, warn, Span};
+use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 pub mod task;
 
@@ -371,11 +373,32 @@ impl Queue {
         }
     }
 
+    fn new_progress_span(&self) -> tracing::Span {
+        let span = info_span!("queue");
+
+        span.pb_set_style(
+            &ProgressStyle::with_template(&format!(
+                " {} {}{{bar:30.bold}}{} {}",
+                console::style("Sending:").bold().dim().cyan(),
+                console::style("[").bold(),
+                console::style("]").bold(),
+                console::style("[{pos}/{len}]").bold().dim().green(),
+            ))
+            .unwrap()
+            .progress_chars("=> "),
+        );
+        span.pb_set_length(self.receivers.len() as u64);
+        span
+    }
+
     pub fn run(&mut self) -> Result<(), task::Error> {
         self.start = Local::now();
         let (mut ptr, mut sent, mut skips) = (0, 0, 0);
         info!(msg = "starting queue", start = format!("{}", self.start));
 
+        let progress = self.new_progress_span();
+
+        let progress_enter = progress.enter();
         'main: loop {
             if self.skip_weekends {
                 Queue::skip_weekend();
@@ -436,7 +459,9 @@ impl Queue {
                         self.pos_min_timeout(&mut ptr);
                         let sender = &self.receivers[ptr].sender;
                         let stats = self.stats.get_mut(&self.receivers[ptr].sender).unwrap();
+
                         info!(msg = "got sender with least timeout", sender = sender);
+
                         if stats.is_timed_out() {
                             let (now, timeout) = (Local::now(), stats.timeout.unwrap());
                             if now.lt(&timeout) {
@@ -473,8 +498,12 @@ impl Queue {
             }
 
             sent += self.collect_tasks(tasks)?;
+            Span::current().pb_inc(self.workers as u64);
             self.save_progress();
         }
+
+        std::mem::drop(progress_enter);
+        std::mem::drop(progress);
 
         Ok(())
     }
