@@ -87,7 +87,7 @@ impl Task {
         }
 
         let plain = templates
-            .render("text", variables)
+            .render("plain", variables)
             .map_err(|err| Error::RenderError {
                 task: self.clone(),
                 err,

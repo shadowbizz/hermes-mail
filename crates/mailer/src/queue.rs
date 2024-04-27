@@ -342,7 +342,7 @@ impl Queue {
         };
     }
 
-    fn pos_min_timeout(&self, ptr: &mut usize) {
+    fn pos_min_timeout(&mut self, ptr: &mut usize) {
         let (sender, _) = self
             .senders
             .iter()
@@ -358,17 +358,22 @@ impl Queue {
                 x.cmp(&y)
             })
             .unwrap();
+        let sender = sender.to_owned();
 
-        *ptr = self
-            .receivers
-            .iter()
-            .position(|r| r.sender.eq(sender))
-            .unwrap();
+        match self.receivers.iter().position(|r| r.sender.eq(&sender)) {
+            Some(p) => {
+                *ptr = p;
+            }
+            None => {
+                self.senders.remove(&sender);
+                self.pos_min_timeout(ptr);
+            }
+        }
     }
 
     pub fn run(&mut self) -> Result<(), task::Error> {
         self.start = Local::now();
-        let (mut ptr, mut skips, mut sent) = (0, 0, 0);
+        let (mut ptr, mut sent, mut skips) = (0, 0, 0);
         info!(msg = "starting queue", start = format!("{}", self.start));
 
         'main: loop {
@@ -397,6 +402,7 @@ impl Queue {
                             sender = receiver.sender,
                             receiver = receiver.email
                         );
+                        self.senders.remove(&receiver.sender);
                         self.remove_receiver(&receiver);
                         self.failed.push(receiver);
                         ptr += 1;
@@ -425,35 +431,36 @@ impl Queue {
                         receiver = receiver.email
                     );
 
-                    if skips > self.receivers.len() {
-                        thread::sleep(self.rate.to_std().unwrap());
-                        skips = 0;
+                    skips += 1;
+                    if skips >= self.receivers.len() {
                         self.pos_min_timeout(&mut ptr);
-                        continue;
-                    } else {
-                        skips += 1;
-                        ptr += 1;
+                        let sender = &self.receivers[ptr].sender;
+                        let stats = self.stats.get_mut(&self.receivers[ptr].sender).unwrap();
+                        info!(msg = "got sender with least timeout", sender = sender);
+                        if stats.is_timed_out() {
+                            let (now, timeout) = (Local::now(), stats.timeout.unwrap());
+                            if now.lt(&timeout) {
+                                let diff = timeout - now;
+                                warn!(msg = "global timeout", duration = format!("{diff}"));
+                                thread::sleep(diff.to_std().unwrap())
+                            }
+                        }
+                        skips = 0;
                         continue;
                     }
+                    ptr += 1;
+                    continue;
                 }
 
-                if !Queue::is_tomorrow(self.start) {
-                    if stat.today > self.daily_limit {
-                        warn!(
-                            msg = "sender hit daily limit; skipping",
-                            sender = receiver.sender,
-                            receiver = receiver.email
-                        );
-                        stat.set_timeout(Duration::try_hours(24).unwrap());
-                        continue;
-                    }
-                    if skips > self.receivers.len() {
-                        skips = 0;
-                        self.pos_min_timeout(&mut ptr);
-                        continue;
-                    } else {
-                        skips += 1;
-                    }
+                if !Queue::is_tomorrow(self.start) && stat.today > self.daily_limit {
+                    warn!(
+                        msg = "sender hit daily limit; skipping",
+                        sender = receiver.sender,
+                        receiver = receiver.email
+                    );
+                    stat.set_timeout(Duration::try_hours(24).unwrap());
+                    ptr += 1;
+                    continue;
                 }
 
                 let sender = self.senders.get(&receiver.sender).unwrap();

@@ -15,14 +15,10 @@ type Error = Box<dyn std::error::Error>;
 fn main() {
     let cmd = cmd::Cmd::parse();
 
-    let (res, guard) = match cmd.command {
-        cmd::Commands::Send(args) => (args.send(), Some(init_logger())),
-        cmd::Commands::Convert(args) => (args.convert(), None),
-    };
-
-    let _guard = match guard {
-        Some(g) => Some(g.unwrap_or_else(|e| print_error(e))),
-        None => None,
+    let _guard = init_logger().unwrap_or_else(|e| print_error(e));
+    let res = match cmd.command {
+        cmd::Commands::Send(args) => args.send(),
+        cmd::Commands::Convert(args) => args.convert(),
     };
 
     res.unwrap_or_else(|e| print_error(e));
