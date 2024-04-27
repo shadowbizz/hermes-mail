@@ -54,7 +54,7 @@ impl SendCommand {
         let mut builder = Builder::new()
             .senders(self.senders.clone())
             .receivers(self.receivers.clone())
-            .skip_codes(self.skip_codes.clone().unwrap_or(CodesVec::default()));
+            .skip_codes(self.skip_codes.clone().unwrap_or_default());
 
         if let Some(workers) = self.workers {
             builder = builder.workers(workers)
@@ -190,15 +190,13 @@ impl ConvertCommand {
                     .interact_text()
                     .unwrap(),
             )
-        } else {
-            if let Some(host) = Select::new()
-                .with_prompt("Pick the field with SMTP hosts")
-                .items(&reader.headers)
-                .interact_opt()
-                .unwrap()
-            {
-                map = map.host(host)
-            }
+        } else if let Some(host) = Select::new()
+            .with_prompt("Pick the field with SMTP hosts")
+            .items(&reader.headers)
+            .interact_opt()
+            .unwrap()
+        {
+            map = map.host(host)
         }
 
         if Confirm::new()
@@ -212,15 +210,13 @@ impl ConvertCommand {
                     .interact_text()
                     .unwrap(),
             )
-        } else {
-            if let Some(host) = Select::new()
-                .with_prompt("Pick the field with the subjects")
-                .items(&reader.headers)
-                .interact_opt()
-                .unwrap()
-            {
-                map = map.subject(host)
-            }
+        } else if let Some(host) = Select::new()
+            .with_prompt("Pick the field with the subjects")
+            .items(&reader.headers)
+            .interact_opt()
+            .unwrap()
+        {
+            map = map.subject(host)
         }
 
         if Confirm::new()
@@ -234,15 +230,13 @@ impl ConvertCommand {
                     .interact_text()
                     .unwrap(),
             )
-        } else {
-            if let Some(read_receipts) = Select::new()
-                .with_prompt("Pick the field with read-receipt receiver email addresses")
-                .items(&reader.headers)
-                .interact_opt()
-                .unwrap()
-            {
-                map = map.read_receipts(read_receipts)
-            }
+        } else if let Some(read_receipts) = Select::new()
+            .with_prompt("Pick the field with read-receipt receiver email addresses")
+            .items(&reader.headers)
+            .interact_opt()
+            .unwrap()
+        {
+            map = map.read_receipts(read_receipts)
         }
 
         if Confirm::new()

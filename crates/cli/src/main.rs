@@ -1,6 +1,6 @@
 use clap::Parser;
 use console::style;
-use std::{env, io, process};
+use std::{env, process};
 use tracing::{self, Level};
 use tracing_appender::{self, non_blocking::WorkerGuard};
 use tracing_indicatif::IndicatifLayer;

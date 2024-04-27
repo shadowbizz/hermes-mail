@@ -21,15 +21,14 @@ impl Display for DataType {
     }
 }
 
+#[derive(Default)]
 pub struct ReceiverHeaderMap {
     data: HashMap<usize, String>,
 }
 
 impl ReceiverHeaderMap {
     pub fn new() -> Self {
-        Self {
-            data: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn email(mut self, i: usize) -> Self {
@@ -64,6 +63,7 @@ impl ReceiverHeaderMap {
     }
 }
 
+#[derive(Default)]
 pub struct SenderHeaderMap {
     data: HashMap<usize, String>,
     auth: Option<Mechanism>,
@@ -76,15 +76,7 @@ pub struct SenderHeaderMap {
 
 impl SenderHeaderMap {
     pub fn new() -> Self {
-        Self {
-            data: HashMap::new(),
-            named_host: None,
-            auth: None,
-            subject: None,
-            plain: None,
-            html: None,
-            read_receipts: None,
-        }
+        Self::default()
     }
 
     pub fn email(mut self, i: usize) -> Self {
@@ -171,7 +163,7 @@ impl Reader {
             .open(file.clone())?
             .write_all_at(&contents, 0)?;
 
-        return Self::new(file);
+        Self::new(file)
     }
 
     fn map_receiver_fields(
@@ -254,7 +246,7 @@ impl Reader {
     {
         let file = match file {
             Some(f) => f,
-            None => env::current_dir()?.join(&format!("converted_{_type}.csv")),
+            None => env::current_dir()?.join(format!("converted_{_type}.csv")),
         };
 
         debug!(
@@ -316,9 +308,8 @@ impl Reader {
             let record = record?;
             let mut sender = Sender::default();
             for (i, source) in record.iter().enumerate() {
-                match sender_map.data.get(&i) {
-                    Some(target) => Reader::map_sender_fields(source, target, &mut sender)?,
-                    None => {}
+                if let Some(target) = sender_map.data.get(&i) {
+                    Reader::map_sender_fields(source, target, &mut sender)?
                 }
 
                 if let Some(host) = sender_map.named_host.as_ref() {
@@ -330,7 +321,7 @@ impl Reader {
                 }
 
                 if let Some(auth) = sender_map.auth.as_ref() {
-                    sender.auth = auth.clone();
+                    sender.auth = *auth
                 }
 
                 if let Some(plain) = sender_map.plain.as_ref() {

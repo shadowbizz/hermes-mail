@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::{
     cmp::Ordering,
     collections::HashMap,
-    env::{self, args},
+    env,
     num::ParseIntError,
     path::PathBuf,
     str::FromStr,
@@ -26,15 +26,9 @@ pub mod task;
 type Senders = Vec<Arc<Sender>>;
 type Receivers = Vec<Arc<Receiver>>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct CodesVec {
     data: Vec<u16>,
-}
-
-impl Default for CodesVec {
-    fn default() -> Self {
-        Self { data: Vec::new() }
-    }
 }
 
 impl FromStr for CodesVec {

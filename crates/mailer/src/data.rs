@@ -22,14 +22,8 @@ pub enum Error {
     TemplateVariableParseError { data: String },
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct TemplateVariables(pub HashMap<String, String>);
-
-impl Default for TemplateVariables {
-    fn default() -> Self {
-        TemplateVariables(HashMap::new())
-    }
-}
 
 impl FromStr for TemplateVariables {
     type Err = Error;
@@ -74,8 +68,7 @@ impl<'de> Deserialize<'de> for TemplateVariables {
         D: Deserializer<'de>,
     {
         let s: &str = Deserialize::deserialize(deserializer)?;
-
-        Ok(Self::from_str(s).map_err(D::Error::custom)?)
+        Self::from_str(s).map_err(D::Error::custom)
     }
 }
 
