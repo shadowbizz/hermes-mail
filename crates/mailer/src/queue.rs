@@ -264,11 +264,7 @@ impl Queue {
             .collect();
     }
 
-    fn collect_tasks(
-        &mut self,
-        tasks: Vec<JoinHandle<task::Result>>,
-    ) -> Result<usize, task::Error> {
-        let len = tasks.len();
+    fn collect_tasks(&mut self, tasks: Vec<JoinHandle<task::Result>>) -> Result<(), task::Error> {
         for res in tasks {
             debug!(msg = "collecting task results");
             match res.join().expect("could not join task thread") {
@@ -319,7 +315,7 @@ impl Queue {
             }
         }
 
-        Ok(len)
+        Ok(())
     }
 
     fn skip_weekend() {
@@ -491,8 +487,12 @@ impl Queue {
                 ptr += 1;
             }
 
-            sent += self.collect_tasks(tasks)?;
-            Span::current().pb_inc(self.workers as u64);
+            let _sent = tasks.len();
+            self.collect_tasks(tasks)?;
+
+            Span::current().pb_inc(_sent as u64);
+            sent += _sent;
+
             self.save_progress();
         }
 
