@@ -6,7 +6,7 @@ use chrono::{DateTime, Datelike, Duration, Local, Timelike};
 use indicatif::ProgressStyle;
 use lettre::transport::smtp::response::Code;
 use rand::{seq::SliceRandom, thread_rng};
-use serde::Serialize;
+use serde::{de::Visitor, Deserialize, Serialize};
 use std::{
     cmp::Ordering,
     collections::HashMap,
@@ -47,6 +47,37 @@ impl FromStr for CodesVec {
     }
 }
 
+struct CodesVecDeserializer;
+
+impl<'de> Visitor<'de> for CodesVecDeserializer {
+    type Value = CodesVec;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("CodesVec u16 sequence")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut codes = CodesVec::default();
+        while let Some(code) = seq.next_element::<u16>()? {
+            codes.data.push(code)
+        }
+
+        Ok(codes)
+    }
+}
+
+impl<'de> Deserialize<'de> for CodesVec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(CodesVecDeserializer)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum BuildError {
     #[error("for file: '{file}'; err: {err}")]
@@ -60,6 +91,7 @@ pub enum BuildError {
 pub struct Builder {
     senders: Option<PathBuf>,
     receivers: Option<PathBuf>,
+    content: Option<PathBuf>,
     workers: u8,
     rate: Duration,
     daily_limit: u32,
@@ -73,6 +105,7 @@ impl Default for Builder {
         Self {
             senders: None,
             receivers: None,
+            content: None,
             workers: 2,
             rate: Duration::try_seconds(60).unwrap(),
             daily_limit: 100,
@@ -95,6 +128,11 @@ impl Builder {
 
     pub fn receivers(mut self, file: PathBuf) -> Self {
         self.receivers = Some(file);
+        self
+    }
+
+    pub fn content(mut self, dir: PathBuf) -> Self {
+        self.content = Some(dir);
         self
     }
 
@@ -146,13 +184,23 @@ impl Builder {
         Ok((senders, receivers))
     }
 
-    fn init_senders(mut senders: Senders) -> Result<HashMap<String, Arc<Sender>>, BuildError> {
+    fn init_senders(
+        mut senders: Senders,
+        content: Option<PathBuf>,
+    ) -> Result<HashMap<String, Arc<Sender>>, BuildError> {
         senders
             .iter_mut()
             .map(|s| {
                 let email = s.email.clone();
                 {
                     let s = Arc::get_mut(s).unwrap();
+                    if let Some(content) = content.as_ref() {
+                        s.plain = content.join(&s.plain);
+                        if let Some(html) = s.html.as_ref() {
+                            s.html = Some(content.join(html));
+                        }
+                    }
+
                     match s.init_templates() {
                         Ok(_) => {}
                         Err(err) => return Err(BuildError::DataError(err)),
@@ -178,7 +226,7 @@ impl Builder {
             .map(|s| (s.email.clone(), Stats::new(s.email.clone())))
             .collect();
 
-        let senders = Builder::init_senders(senders)?;
+        let senders = Builder::init_senders(senders, self.content)?;
 
         Ok(Queue {
             start: Local::now(),
@@ -246,6 +294,7 @@ impl Queue {
 
     fn reset_daily_lim(&mut self) {
         debug!(msg = "resetting daily limits");
+        self.start = Local::now();
         self.stats.iter_mut().for_each(|(_, stat)| stat.reset_day());
     }
 

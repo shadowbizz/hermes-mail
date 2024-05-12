@@ -3,7 +3,8 @@ use dialoguer::{Confirm, Input, MultiSelect, Select};
 use hermes_csv::{Reader, ReceiverHeaderMap, SenderHeaderMap};
 use hermes_mailer::queue::{Builder, CodesVec};
 use lettre::transport::smtp::authentication::Mechanism;
-use std::path::PathBuf;
+use serde::Deserialize;
+use std::{fs, path::PathBuf};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -21,14 +22,19 @@ pub enum Commands {
     Convert(ConvertCommand),
 }
 
-#[derive(Args)]
+#[derive(Args, Deserialize)]
 pub struct SendCommand {
+    /// Path to send configuration file
+    #[arg(short, long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
     /// Path to file containing senders and their info
-    #[arg(short, long, value_name = "FILE")]
-    pub senders: PathBuf,
+    #[arg(short, long, value_name = "FILE", required_unless_present("config"))]
+    pub senders: Option<PathBuf>,
     /// Path to file containing receivers and their info
-    #[arg(short, long, value_name = "FILE")]
-    pub receivers: PathBuf,
+    #[arg(short, long, value_name = "FILE", required_unless_present("config"))]
+    pub receivers: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    pub content: Option<PathBuf>,
     /// Sets the number of workers that will send email simultaneously
     #[arg(short, long, value_name = "NUMBER")]
     pub workers: Option<u8>,
@@ -40,21 +46,33 @@ pub struct SendCommand {
     pub daily_rate: Option<u32>,
     /// Skip sending emails on the weekends
     #[arg(long, action = SetTrue)]
-    pub skip_weekends: bool,
+    pub skip_weekends: Option<bool>,
     /// Skip senders that have received prior permanent SMTP codes
     #[arg(long, action = SetTrue)]
-    pub skip_permanent: bool,
+    pub skip_permanent: Option<bool>,
     /// Skip senders which encounter the specified codes
     #[arg(long, value_name = "LIST", value_parser = clap::value_parser!(CodesVec))]
     pub skip_codes: Option<CodesVec>,
 }
 
 impl SendCommand {
-    pub(crate) fn send(self) -> Result<(), super::Error> {
+    pub(crate) fn send(mut self) -> Result<(), super::Error> {
+        if let Some(config) = self.config {
+            let data = fs::read_to_string(config)?;
+            self = toml::from_str(&data)?;
+            if self.senders.is_none() || self.receivers.is_none() {
+                return Err("Missing either senders or receivers".into());
+            }
+        }
+
         let mut builder = Builder::new()
-            .senders(self.senders.clone())
-            .receivers(self.receivers.clone())
+            .senders(self.senders.unwrap().clone())
+            .receivers(self.receivers.unwrap().clone())
             .skip_codes(self.skip_codes.clone().unwrap_or_default());
+
+        if let Some(content) = self.content {
+            builder = builder.content(content);
+        }
 
         if let Some(workers) = self.workers {
             builder = builder.workers(workers)
@@ -68,11 +86,11 @@ impl SendCommand {
             builder = builder.daily_rate(rate)
         }
 
-        if self.skip_weekends {
+        if self.skip_weekends.unwrap_or(false) {
             builder = builder.skip_weekends()
         }
 
-        if self.skip_permanent {
+        if self.skip_permanent.unwrap_or(false) {
             builder = builder.skip_weekends()
         }
 
