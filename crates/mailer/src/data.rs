@@ -1,12 +1,13 @@
 use handlebars::{Handlebars, TemplateError};
 use lettre::message::Mailboxes;
 use lettre::transport::smtp::authentication::Mechanism;
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, Visitor};
 use serde::Serializer;
 use serde::{de::Error as SerdeError, Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io;
+use std::num::ParseIntError;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -69,6 +70,58 @@ impl<'de> Deserialize<'de> for TemplateVariables {
     {
         let s: &str = Deserialize::deserialize(deserializer)?;
         Self::from_str(s).map_err(D::Error::custom)
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct CodesVec {
+    pub(crate) data: Vec<u16>,
+}
+
+impl FromStr for CodesVec {
+    type Err = ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() {
+            return Ok(CodesVec::default());
+        }
+        let data = s
+            .split(',')
+            .map(|s| s.parse::<u16>())
+            .collect::<Result<Vec<u16>, ParseIntError>>()?;
+
+        Ok(CodesVec { data })
+    }
+}
+
+struct CodesVecDeserializer;
+
+impl<'de> Visitor<'de> for CodesVecDeserializer {
+    type Value = CodesVec;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("CodesVec u16 sequence")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut codes = CodesVec::default();
+        while let Some(code) = seq.next_element::<u16>()? {
+            codes.data.push(code)
+        }
+
+        Ok(codes)
+    }
+}
+
+impl<'de> Deserialize<'de> for CodesVec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(CodesVecDeserializer)
     }
 }
 
@@ -204,6 +257,9 @@ impl PartialEq for Sender {
     }
 }
 
+pub type Senders = Vec<Arc<Sender>>;
+pub type Receivers = Vec<Arc<Receiver>>;
+
 pub fn read_input<D>(file: &PathBuf) -> Result<Vec<Arc<D>>, csv::Error>
 where
     D: DeserializeOwned,
@@ -220,7 +276,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{fs, str::FromStr};
 
     use super::*;
 
@@ -269,6 +325,12 @@ mod tests {
             }
             .into()
         );
+
+        Ok(())
+    }
+
+    fn test_template_vars() -> Result<(), Box<dyn std::error::Error>> {
+        let test_data = fs::read_to_string("../../testdata/template_vars.txt")?;
 
         Ok(())
     }

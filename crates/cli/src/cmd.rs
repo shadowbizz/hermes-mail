@@ -1,7 +1,7 @@
 use clap::{ArgAction::SetTrue, Args, Parser, Subcommand};
 use dialoguer::{Confirm, Input, MultiSelect, Select};
 use hermes_csv::{Reader, ReceiverHeaderMap, SenderHeaderMap};
-use hermes_mailer::queue::{Builder, CodesVec};
+use hermes_mailer::{data::CodesVec, queue::Builder};
 use lettre::transport::smtp::authentication::Mechanism;
 use serde::Deserialize;
 use std::{fs, path::PathBuf};
@@ -33,6 +33,7 @@ pub struct SendCommand {
     /// Path to file containing receivers and their info
     #[arg(short, long, value_name = "FILE", required_unless_present("config"))]
     pub receivers: Option<PathBuf>,
+    /// Path to folder containing email message files
     #[arg(long, value_name = "PATH")]
     pub content: Option<PathBuf>,
     /// Sets the number of workers that will send email simultaneously
@@ -95,7 +96,7 @@ impl SendCommand {
         }
 
         let mut q = builder.build()?;
-        q.run()?;
+        q.run();
 
         Ok(())
     }

@@ -3,14 +3,12 @@ use serde::Serialize;
 
 #[derive(Serialize)]
 pub(super) struct Stats {
-    sender: String,
+    pub(crate) sender: String,
     pub(crate) today: u32,
     total: u64,
     bounced: u64,
     failed: u64,
-    #[serde(skip_serializing)]
-    skip: bool,
-    skipped: u64,
+    blocked: bool,
     #[serde(skip_serializing)]
     pub(crate) timeout: Option<DateTime<Local>>,
 }
@@ -23,8 +21,7 @@ impl Stats {
             total: 0,
             bounced: 0,
             failed: 0,
-            skipped: 0,
-            skip: false,
+            blocked: false,
             timeout: None,
         }
     }
@@ -60,19 +57,15 @@ impl Stats {
         self.failed += amnt;
     }
 
-    pub fn inc_skipped(&mut self, amnt: u64) {
-        self.skipped += amnt;
-    }
-
-    pub fn reset_day(&mut self) {
+    pub fn reset_daily(&mut self) {
         self.today = 0;
     }
 
-    pub fn skip(&mut self) {
-        self.skip = true
+    pub fn block(&mut self) {
+        self.blocked = true
     }
 
-    pub fn should_skip(&mut self) -> bool {
-        self.skip
+    pub fn is_blocked(&mut self) -> bool {
+        self.blocked
     }
 }

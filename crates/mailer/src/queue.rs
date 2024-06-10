@@ -1,19 +1,17 @@
 use crate::{
-    data::{self, Receiver, Sender},
+    data::{self, CodesVec, Receiver, Receivers, Sender, Senders},
     stats::Stats,
 };
 use chrono::{DateTime, Datelike, Duration, Local, Timelike};
 use indicatif::ProgressStyle;
 use lettre::transport::smtp::response::Code;
 use rand::{seq::SliceRandom, thread_rng};
-use serde::{de::Visitor, Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     cmp::Ordering,
     collections::HashMap,
     env,
-    num::ParseIntError,
     path::PathBuf,
-    str::FromStr,
     sync::Arc,
     thread::{self, JoinHandle},
 };
@@ -22,61 +20,6 @@ use tracing::{debug, error, info, info_span, warn, Span};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 pub mod task;
-
-type Senders = Vec<Arc<Sender>>;
-type Receivers = Vec<Arc<Receiver>>;
-
-#[derive(Debug, Default, Clone)]
-pub struct CodesVec {
-    data: Vec<u16>,
-}
-
-impl FromStr for CodesVec {
-    type Err = ParseIntError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.is_empty() {
-            return Ok(CodesVec::default());
-        }
-        let data = s
-            .split(',')
-            .map(|s| s.parse::<u16>())
-            .collect::<Result<Vec<u16>, ParseIntError>>()?;
-
-        Ok(CodesVec { data })
-    }
-}
-
-struct CodesVecDeserializer;
-
-impl<'de> Visitor<'de> for CodesVecDeserializer {
-    type Value = CodesVec;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        formatter.write_str("CodesVec u16 sequence")
-    }
-
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-    where
-        A: serde::de::SeqAccess<'de>,
-    {
-        let mut codes = CodesVec::default();
-        while let Some(code) = seq.next_element::<u16>()? {
-            codes.data.push(code)
-        }
-
-        Ok(codes)
-    }
-}
-
-impl<'de> Deserialize<'de> for CodesVec {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_seq(CodesVecDeserializer)
-    }
-}
 
 #[derive(Debug, Error)]
 pub enum BuildError {
@@ -185,15 +128,15 @@ impl Builder {
     }
 
     fn init_senders(
-        mut senders: Senders,
+        senders: Senders,
         content: Option<PathBuf>,
     ) -> Result<HashMap<String, Arc<Sender>>, BuildError> {
         senders
-            .iter_mut()
-            .map(|s| {
+            .into_iter()
+            .map(|mut s| {
                 let email = s.email.clone();
                 {
-                    let s = Arc::get_mut(s).unwrap();
+                    let s = Arc::get_mut(&mut s).unwrap();
                     if let Some(content) = content.as_ref() {
                         s.plain = content.join(&s.plain);
                         if let Some(html) = s.html.as_ref() {
@@ -276,26 +219,12 @@ impl Queue {
         Ok(())
     }
 
-    fn save_receivers<S>(records: &[S], filename: &str) -> Result<(), csv::Error>
-    where
-        S: Serialize,
-    {
-        let cwd = env::current_dir().unwrap();
-        let file = cwd.join(filename);
-        debug!(msg = "saving receivers", file = format!("{file:?}"));
-
-        let mut writer = csv::Writer::from_path(file)?;
-        for record in records {
-            writer.serialize(record)?;
-        }
-
-        Ok(())
-    }
-
     fn reset_daily_lim(&mut self) {
         debug!(msg = "resetting daily limits");
         self.start = Local::now();
-        self.stats.iter_mut().for_each(|(_, stat)| stat.reset_day());
+        self.stats
+            .iter_mut()
+            .for_each(|(_, stat)| stat.reset_daily());
     }
 
     fn remove_receiver(&mut self, receiver: &Arc<Receiver>) {
@@ -313,7 +242,10 @@ impl Queue {
             .collect();
     }
 
-    fn collect_tasks(&mut self, tasks: Vec<JoinHandle<task::Result>>) -> Result<(), task::Error> {
+    fn collect_tasks(
+        &mut self,
+        tasks: Vec<JoinHandle<task::TaskResult>>,
+    ) -> Result<(), task::Error> {
         for res in tasks {
             debug!(msg = "collecting task results");
             match res.join().expect("could not join task thread") {
@@ -329,12 +261,6 @@ impl Queue {
                 }
 
                 Err(err) => match err {
-                    task::Error::AddressError { .. }
-                    | task::Error::RenderError { .. }
-                    | task::Error::TransportError { .. }
-                    | task::Error::MessageBuildError { .. } => {
-                        return Err(err);
-                    }
                     task::Error::SendError { task, err } => {
                         error!(
                             msg = "failure",
@@ -345,21 +271,25 @@ impl Queue {
 
                         let stats = self.stats.get_mut(&task.sender.email).unwrap();
                         if self.skip_permanent && err.is_permanent() {
-                            stats.skip();
+                            stats.block();
                             stats.inc_bounced(1);
+                            self.remove_receiver(&task.receiver);
+                            self.failed.push(task.receiver);
+                            continue;
                         }
                         match Queue::code_to_int(err.status()) {
                             Some(code) => {
                                 if self.skip_codes.binary_search(&code).is_ok() {
-                                    stats.skip();
+                                    stats.block();
                                     stats.inc_bounced(1);
+                                    self.remove_receiver(&task.receiver);
                                 }
                             }
                             None => stats.inc_failed(1),
                         };
-                        self.remove_receiver(&task.receiver);
                         self.failed.push(task.receiver);
                     }
+                    _ => return Err(err),
                 },
             }
         }
@@ -367,47 +297,30 @@ impl Queue {
         Ok(())
     }
 
-    fn skip_weekend() {
-        match Local::now().weekday() {
-            chrono::Weekday::Sat => {
-                let dur = Queue::calculate_time_until(2);
-                warn!(msg = "sleeping for the weekend", dur = format!("{dur}"));
-                thread::sleep(dur.to_std().unwrap());
+    fn pos_min_timeout(&mut self, stack_size: usize) -> Option<usize> {
+        if stack_size >= self.stats.len() {
+            return None;
+        }
+
+        let sender = match self.stats.iter().min_by(|x, y| {
+            let (x, y) = (x.1, y.1);
+            if x.timeout.is_none() {
+                return Ordering::Less;
+            } else if y.timeout.is_none() {
+                return Ordering::Greater;
             }
-            chrono::Weekday::Sun => {
-                let dur = Queue::calculate_time_until(1);
-                warn!(msg = "sleeping for the weekend", dur = format!("{dur}"));
-                thread::sleep(dur.to_std().unwrap());
-            }
-            _ => {}
+            let (x, y) = (x.timeout.unwrap(), y.timeout.unwrap());
+            x.cmp(&y)
+        }) {
+            Some((email, _)) => email,
+            None => return None,
         };
-    }
 
-    fn pos_min_timeout(&mut self, ptr: &mut usize) {
-        let (sender, _) = self
-            .senders
-            .iter()
-            .min_by(|x, y| {
-                let (x, y) = (self.stats.get(x.0).unwrap(), self.stats.get(y.0).unwrap());
-                if x.timeout.is_none() {
-                    return Ordering::Less;
-                } else if y.timeout.is_none() {
-                    return Ordering::Greater;
-                }
-
-                let (x, y) = (x.timeout.unwrap(), y.timeout.unwrap());
-                x.cmp(&y)
-            })
-            .unwrap();
-        let sender = sender.to_owned();
-
-        match self.receivers.iter().position(|r| r.sender.eq(&sender)) {
-            Some(p) => {
-                *ptr = p;
-            }
+        match self.receivers.iter().position(|r| r.sender.eq(sender)) {
+            Some(p) => Some(p),
             None => {
-                self.senders.remove(&sender);
-                self.pos_min_timeout(ptr);
+                self.senders.remove(sender);
+                return self.pos_min_timeout(stack_size);
             }
         }
     }
@@ -430,7 +343,7 @@ impl Queue {
         span
     }
 
-    pub fn run(&mut self) -> Result<(), task::Error> {
+    pub fn run(&mut self) {
         self.start = Local::now();
         let (mut ptr, mut sent, mut skips) = (0, 0, 0);
         info!(msg = "starting queue", start = format!("{}", self.start));
@@ -443,7 +356,7 @@ impl Queue {
                 Queue::skip_weekend();
             }
 
-            let mut tasks: Vec<JoinHandle<task::Result>> = Vec::new();
+            let mut tasks: Vec<JoinHandle<task::TaskResult>> = Vec::new();
             for _ in 0..self.workers {
                 if self.receivers.is_empty() {
                     info!(msg = "finished sending mails", total_sent = sent);
@@ -472,15 +385,13 @@ impl Queue {
                     }
                 };
 
-                if stat.should_skip() {
-                    stat.inc_skipped(1);
+                if stat.is_blocked() {
                     warn!(
                         msg = "skipping flagged sender",
                         sender = receiver.sender,
                         receiver = receiver.email,
                     );
 
-                    self.remove_receiver(&receiver);
                     self.failed.push(receiver);
                     ptr += 1;
                     continue;
@@ -495,20 +406,17 @@ impl Queue {
 
                     skips += 1;
                     if skips >= self.receivers.len() {
-                        self.pos_min_timeout(&mut ptr);
-                        let sender = &self.receivers[ptr].sender;
-                        let stats = self.stats.get_mut(&self.receivers[ptr].sender).unwrap();
-
-                        info!(msg = "got sender with least timeout", sender = sender);
-
-                        if stats.is_timed_out() {
-                            let (now, timeout) = (Local::now(), stats.timeout.unwrap());
-                            if now.lt(&timeout) {
-                                let diff = timeout - now;
-                                warn!(msg = "global timeout", duration = format!("{diff}"));
-                                thread::sleep(diff.to_std().unwrap())
-                            }
+                        let timeout = stat.timeout.unwrap();
+                        let pos = self.pos_min_timeout(0);
+                        if let Some(pos) = pos {
+                            ptr = pos;
+                            let sender = &self.receivers[ptr].sender;
+                            let stat = self.stats.get_mut(&self.receivers[ptr].sender).unwrap();
+                            info!(msg = "got sender with least timeout", sender = sender);
+                            Queue::pause(stat.timeout.unwrap());
+                            continue;
                         }
+                        Queue::pause(timeout);
                         skips = 0;
                         continue;
                     }
@@ -528,7 +436,7 @@ impl Queue {
                 }
 
                 let sender = self.senders.get(&receiver.sender).unwrap();
-                let task = task::Task::new(sender.clone(), receiver.clone());
+                let task = task::Task::new(sender.clone(), receiver);
 
                 tasks.push(task.spawn());
 
@@ -537,7 +445,12 @@ impl Queue {
             }
 
             let _sent = tasks.len();
-            self.collect_tasks(tasks)?;
+            self.collect_tasks(tasks).unwrap_or_else(|err| {
+                error!(
+                    msg = "failed to collect send results",
+                    err = format!("{err}")
+                )
+            });
 
             Span::current().pb_inc(_sent as u64);
             sent += _sent;
@@ -547,8 +460,6 @@ impl Queue {
 
         std::mem::drop(progress_enter);
         std::mem::drop(progress);
-
-        Ok(())
     }
 
     fn save_progress(&self) {
@@ -581,6 +492,47 @@ impl Queue {
         dur -= Duration::try_seconds(now.second() as i64).unwrap();
 
         dur
+    }
+
+    fn skip_weekend() {
+        match Local::now().weekday() {
+            chrono::Weekday::Sat => {
+                let dur = Queue::calculate_time_until(2);
+                warn!(msg = "sleeping for the weekend", dur = format!("{dur}"));
+                thread::sleep(dur.to_std().unwrap());
+            }
+            chrono::Weekday::Sun => {
+                let dur = Queue::calculate_time_until(1);
+                warn!(msg = "sleeping for the weekend", dur = format!("{dur}"));
+                thread::sleep(dur.to_std().unwrap());
+            }
+            _ => {}
+        };
+    }
+
+    fn pause(timeout: DateTime<Local>) {
+        let (now, timeout) = (Local::now(), timeout);
+        if now.lt(&timeout) {
+            let diff = timeout - now;
+            warn!(msg = "pausing", duration = format!("{diff}"));
+            thread::sleep(diff.to_std().unwrap())
+        }
+    }
+
+    fn save_receivers<S>(records: &[S], filename: &str) -> Result<(), csv::Error>
+    where
+        S: Serialize,
+    {
+        let cwd = env::current_dir().unwrap();
+        let file = cwd.join(filename);
+        debug!(msg = "saving receivers", file = format!("{file:?}"));
+
+        let mut writer = csv::Writer::from_path(file)?;
+        for record in records {
+            writer.serialize(record)?;
+        }
+
+        Ok(())
     }
 }
 
