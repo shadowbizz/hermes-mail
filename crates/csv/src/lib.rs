@@ -167,18 +167,18 @@ impl Reader {
     }
 
     fn map_receiver_fields(
-        field: &String,
+        field: &str,
         source: &str,
-        target: &String,
+        target: &str,
         receiver: &mut Receiver,
     ) -> Result<(), Box<dyn Error>> {
         debug!(
-            msg = "got receiver field",
+            msg = "got receiver column",
             field = field,
             source = source,
             target = target
         );
-        match target.as_str() {
+        match target {
             "email" => receiver.email = source.into(),
             "sender" => receiver.sender = source.into(),
             "cc" => {
@@ -202,7 +202,7 @@ impl Reader {
 
                 match receiver.variables.as_mut() {
                     Some(vars) => {
-                        vars.0.insert(field.clone(), source.replace(';', ""));
+                        vars.0.insert(field.to_owned(), source.replace(';', ""));
                     }
                     None => {
                         let _ = receiver
@@ -222,14 +222,15 @@ impl Reader {
 
     fn map_sender_fields(
         source: &str,
-        target: &String,
+        target: &str,
         sender: &mut Sender,
     ) -> Result<(), Box<dyn Error>> {
-        debug!(msg = "got sender field", source = source, target = target);
-        match target.as_str() {
+        debug!(msg = "got sender column", source = source, target = target);
+        match target {
             "email" => sender.email = source.to_string(),
             "secret" => sender.secret = source.to_string(),
             "host" => sender.host = source.to_string(),
+            "subject" => sender.subject = source.to_string(),
             &_ => {}
         }
 
@@ -273,7 +274,7 @@ impl Reader {
         for record in self.rdr.records() {
             let record = record?;
             let mut receiver = Receiver::default();
-            for (i, source) in record.iter().enumerate() {
+            for (i, source) in record.into_iter().enumerate() {
                 match receiver_map.data.get(&i) {
                     Some(target) => Reader::map_receiver_fields(
                         &self.headers[i],
@@ -287,14 +288,7 @@ impl Reader {
             receivers.push(receiver);
         }
 
-        Reader::save_output(
-            outfile,
-            receivers
-                .into_iter()
-                .filter(|i| !i.email.is_empty())
-                .collect(),
-            DataType::Receivers,
-        )
+        Reader::save_output(outfile, receivers, DataType::Receivers)
     }
 
     pub fn convert_senders(
@@ -307,7 +301,7 @@ impl Reader {
         for record in self.rdr.records() {
             let record = record?;
             let mut sender = Sender::default();
-            for (i, source) in record.iter().enumerate() {
+            for (i, source) in record.into_iter().enumerate() {
                 if let Some(target) = sender_map.data.get(&i) {
                     Reader::map_sender_fields(source, target, &mut sender)?
                 }
@@ -339,13 +333,6 @@ impl Reader {
             senders.push(sender);
         }
 
-        Reader::save_output(
-            outfile,
-            senders
-                .into_iter()
-                .filter(|i| !i.email.is_empty())
-                .collect(),
-            DataType::Senders,
-        )
+        Reader::save_output(outfile, senders, DataType::Senders)
     }
 }
