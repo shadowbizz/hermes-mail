@@ -4,7 +4,7 @@ use lettre::{
     address::AddressError,
     message::{
         header::{HeaderName, HeaderValue},
-        MultiPart,
+        Mailbox, MultiPart,
     },
     transport::smtp::{self, authentication::Credentials},
     Message, SmtpTransport, Transport,
@@ -35,44 +35,46 @@ pub struct Task {
     pub receiver: Arc<Receiver>,
 }
 
-pub type Result = core::result::Result<Task, Error>;
+pub type TaskResult = Result<Task, Error>;
+
+const DISPOSITION_HEADER: &'static str = "Disposition-Notification-To";
+const RETURN_RECEIPT_HEADER: &'static str = "Disposition-Notification-To";
 
 impl Task {
     pub(super) fn new(sender: Arc<Sender>, receiver: Arc<Receiver>) -> Self {
         Task { sender, receiver }
     }
 
-    fn send(self) -> Result {
-        let (sender, receiver, empty) = (
-            self.clone().sender.clone(),
-            self.clone().receiver.clone(),
-            TemplateVariables::default(),
-        );
-        let transport = create_transport(sender.clone()).map_err(|err| Error::TransportError {
-            task: self.clone().clone(),
-            err,
-        })?;
+    fn send(self) -> TaskResult {
+        let (sender, receiver, empty) =
+            (&self.sender, &self.receiver, TemplateVariables::default());
+        let transport = match create_transport(&sender) {
+            Ok(t) => t,
+            Err(err) => return Err(Error::TransportError { task: self, err }),
+        };
 
         let templates = sender.templates.as_ref().unwrap();
         let variables = &receiver.variables.as_ref().unwrap_or(&empty).0;
 
+        let sender_mbox: Mailbox = match sender.email.parse() {
+            Ok(s) => s,
+            Err(err) => return Err(Error::AddressError { task: self, err }),
+        };
+
+        let receiver_mbox: Mailbox = match receiver.email.parse() {
+            Ok(r) => r,
+            Err(err) => return Err(Error::AddressError { task: self, err }),
+        };
+
+        let subject = match templates.render("subject", &sender.subject) {
+            Ok(s) => s,
+            Err(err) => return Err(Error::RenderError { task: self, err }),
+        };
+
         let mut builder = Message::builder()
-            .from(sender.email.parse().map_err(|err| Error::AddressError {
-                task: self.clone().clone(),
-                err,
-            })?)
-            .to(receiver.email.parse().map_err(|err| Error::AddressError {
-                task: self.clone(),
-                err,
-            })?)
-            .subject(
-                templates
-                    .render("subject", &sender.subject)
-                    .map_err(|err| Error::RenderError {
-                        task: self.clone(),
-                        err,
-                    })?,
-            );
+            .from(sender_mbox)
+            .to(receiver_mbox)
+            .subject(subject);
 
         if let Some(cc) = receiver.cc.as_ref() {
             for mailbox in cc.iter() {
@@ -86,43 +88,32 @@ impl Task {
             }
         }
 
-        let plain = templates
-            .render("plain", variables)
-            .map_err(|err| Error::RenderError {
-                task: self.clone(),
-                err,
-            })?;
+        let plain = match templates.render("plain", variables) {
+            Ok(p) => p,
+            Err(err) => return Err(Error::RenderError { task: self, err }),
+        };
+
         let mut msg = if templates.has_template("html") {
-            let html = templates
-                .render("html", &variables)
-                .map_err(|err| Error::RenderError {
-                    task: self.clone(),
-                    err,
-                })?;
-            builder
-                .multipart(MultiPart::alternative_plain_html(plain, html))
-                .map_err(|err| Error::MessageBuildError {
-                    task: self.clone(),
-                    err,
-                })?
+            let html = match templates.render("html", &variables) {
+                Ok(h) => h,
+                Err(err) => return Err(Error::RenderError { task: self, err }),
+            };
+
+            match builder.multipart(MultiPart::alternative_plain_html(plain, html)) {
+                Ok(m) => m,
+                Err(err) => return Err(Error::MessageBuildError { task: self, err }),
+            }
         } else {
-            builder
-                .body(plain)
-                .map_err(|err| Error::MessageBuildError {
-                    task: self.clone(),
-                    err,
-                })?
+            match builder.body(plain) {
+                Ok(m) => m,
+                Err(err) => return Err(Error::MessageBuildError { task: self, err }),
+            }
         };
 
         if let Some(read_receipts) = sender.read_receipt.as_ref() {
-            set_header(
-                &mut msg,
-                "Disposition-Notification-To",
-                read_receipts.clone(),
-            );
-            set_header(&mut msg, "Return-Receipt-To", read_receipts.clone());
+            set_header(&mut msg, DISPOSITION_HEADER, read_receipts.clone());
+            set_header(&mut msg, RETURN_RECEIPT_HEADER, read_receipts.clone());
         }
-        set_header(&mut msg, "Reply-To", sender.email.clone());
 
         match transport.send(&msg) {
             Ok(_) => Ok(self),
@@ -130,12 +121,12 @@ impl Task {
         }
     }
 
-    pub(super) fn spawn(self) -> JoinHandle<Result> {
+    pub(super) fn spawn(self) -> JoinHandle<TaskResult> {
         thread::spawn(move || self.send())
     }
 }
 
-fn create_transport(sender: Arc<Sender>) -> core::result::Result<SmtpTransport, smtp::Error> {
+fn create_transport(sender: &Arc<Sender>) -> core::result::Result<SmtpTransport, smtp::Error> {
     Ok(SmtpTransport::relay(&sender.host)?
         .credentials(Credentials::new(
             sender.email.clone(),
