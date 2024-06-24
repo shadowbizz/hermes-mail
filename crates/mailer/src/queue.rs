@@ -1,6 +1,7 @@
 use crate::{
-    data::{self, CodesVec, Receiver, Receivers, Sender, Senders},
+    data::{self, CodesVec, DashboardConfig, Receiver, Receivers, Sender, Senders},
     stats::Stats,
+    websocket,
 };
 use chrono::{DateTime, Datelike, Duration, Local, Timelike};
 use indicatif::ProgressStyle;
@@ -12,6 +13,7 @@ use std::{
     collections::HashMap,
     env,
     path::PathBuf,
+    process,
     sync::Arc,
     thread::{self, JoinHandle},
 };
@@ -32,29 +34,35 @@ pub enum BuildError {
 }
 
 pub struct Builder {
-    senders: Option<PathBuf>,
-    receivers: Option<PathBuf>,
     content: Option<PathBuf>,
-    workers: u8,
-    rate: Duration,
     daily_limit: u32,
-    skip_weekends: bool,
-    skip_permanent: bool,
+    dashboard_config: Option<DashboardConfig>,
+    rate: Duration,
+    receivers: Option<PathBuf>,
+    save_progress: bool,
     skip_codes: Vec<u16>,
+    skip_permanent: bool,
+    skip_weekends: bool,
+    senders: Option<PathBuf>,
+    workers: usize,
+    read_receipts: bool,
 }
 
 impl Default for Builder {
     fn default() -> Self {
         Self {
-            senders: None,
-            receivers: None,
             content: None,
-            workers: 2,
-            rate: Duration::try_seconds(60).unwrap(),
             daily_limit: 100,
-            skip_weekends: false,
-            skip_permanent: false,
+            dashboard_config: None,
+            rate: Duration::try_seconds(60).unwrap(),
+            read_receipts: false,
+            receivers: None,
+            save_progress: false,
+            senders: None,
             skip_codes: Vec::new(),
+            skip_permanent: false,
+            skip_weekends: false,
+            workers: 2,
         }
     }
 }
@@ -84,12 +92,17 @@ impl Builder {
         self
     }
 
-    pub fn daily_rate(mut self, rate: u32) -> Self {
+    pub fn read_receipts(mut self) -> Self {
+        self.read_receipts = true;
+        self
+    }
+
+    pub fn daily_limit(mut self, rate: u32) -> Self {
         self.daily_limit = rate;
         self
     }
 
-    pub fn workers(mut self, num: u8) -> Self {
+    pub fn workers(mut self, num: usize) -> Self {
         self.workers = num;
         self
     }
@@ -104,9 +117,19 @@ impl Builder {
         self
     }
 
+    pub fn save_progress(mut self) -> Self {
+        self.save_progress = true;
+        self
+    }
+
     pub fn skip_codes(mut self, codes: CodesVec) -> Self {
         self.skip_codes = codes.data;
         self.skip_codes.sort();
+        self
+    }
+
+    pub fn dashboard_config(mut self, d: DashboardConfig) -> Self {
+        self.dashboard_config = Some(d);
         self
     }
 
@@ -171,39 +194,59 @@ impl Builder {
 
         let senders = Builder::init_senders(senders, self.content)?;
 
+        let workers = match self.workers.gt(&senders.len()) {
+            true => senders.len(),
+            false => self.workers,
+        };
+
+        let failures = Receivers::with_capacity(receivers.len());
         Ok(Queue {
-            start: Local::now(),
-            senders,
+            daily_limit: self.daily_limit,
+            dashboard_config: self.dashboard_config,
+            failures,
+            rate: self.rate,
+            read_receipts: self.read_receipts,
             receivers,
-            stats,
+            save_progress: self.save_progress,
+            senders,
             skip_weekends: self.skip_weekends,
             skip_permanent: self.skip_permanent,
             skip_codes: self.skip_codes,
-            rate: self.rate,
-            daily_limit: self.daily_limit,
-            workers: self.workers,
-            failed: Vec::new(),
+            start: Local::now(),
+            stats,
+            workers,
         })
     }
 }
 
 pub struct Queue {
-    start: DateTime<Local>,
-    senders: HashMap<String, Arc<Sender>>,
-    receivers: Receivers,
-    stats: HashMap<String, Stats>,
-    skip_weekends: bool,
-    skip_permanent: bool,
-    skip_codes: Vec<u16>,
-    rate: Duration,
     daily_limit: u32,
-    workers: u8,
-    failed: Receivers,
+    dashboard_config: Option<DashboardConfig>,
+    failures: Receivers,
+    rate: Duration,
+    receivers: Receivers,
+    read_receipts: bool,
+    save_progress: bool,
+    senders: HashMap<String, Arc<Sender>>,
+    skip_codes: Vec<u16>,
+    skip_permanent: bool,
+    skip_weekends: bool,
+    start: DateTime<Local>,
+    stats: HashMap<String, Stats>,
+    workers: usize,
 }
 
 impl Queue {
     pub fn builder() -> Builder {
         Builder::default()
+    }
+
+    fn reset_daily_lim(&mut self) {
+        debug!(msg = "resetting daily limits");
+        self.start = Local::now();
+        self.stats
+            .iter_mut()
+            .for_each(|(_, stat)| stat.reset_daily());
     }
 
     fn save_stats(&self) -> Result<(), csv::Error> {
@@ -217,14 +260,6 @@ impl Queue {
         }
 
         Ok(())
-    }
-
-    fn reset_daily_lim(&mut self) {
-        debug!(msg = "resetting daily limits");
-        self.start = Local::now();
-        self.stats
-            .iter_mut()
-            .for_each(|(_, stat)| stat.reset_daily());
     }
 
     fn remove_receiver(&mut self, receiver: &Arc<Receiver>) {
@@ -245,10 +280,19 @@ impl Queue {
     fn collect_tasks(
         &mut self,
         tasks: Vec<JoinHandle<task::TaskResult>>,
-    ) -> Result<(), task::Error> {
+        outbound_tx: &websocket::SocketChannelSender,
+    ) -> Result<usize, task::Error> {
+        let mut sent = 0;
         for res in tasks {
             debug!(msg = "collecting task results");
-            match res.join().expect("could not join task thread") {
+            let res = match res.join() {
+                Ok(r) => r,
+                Err(e) => {
+                    error!(msg = "collect err", err = format!("{e:?}"));
+                    continue;
+                }
+            };
+            match res {
                 Ok(task) => {
                     let stats = self.stats.get_mut(&task.sender.email).unwrap();
                     stats.inc_sent(1);
@@ -257,7 +301,23 @@ impl Queue {
                         sender = task.sender.email,
                         receiver = task.receiver.email
                     );
+
+                    if let Some(dash) = self.dashboard_config.as_ref() {
+                        match serde_json::to_string(&stats) {
+                            Ok(stats) => websocket::Message::send_sender_stats(
+                                outbound_tx,
+                                dash.instance.clone(),
+                                dash.user.clone(),
+                                stats,
+                            ),
+                            Err(err) => {
+                                error!(msg = "failed to send sender stats", err = format!("{err}"))
+                            }
+                        };
+                    }
+
                     self.remove_receiver(&task.receiver);
+                    sent += 1;
                 }
 
                 Err(err) => match err {
@@ -266,7 +326,8 @@ impl Queue {
                             msg = "failure",
                             error = format!("{err}"),
                             sender = task.sender.email,
-                            receiver = task.receiver.email
+                            receiver = task.receiver.email,
+                            soft = !err.is_permanent(),
                         );
 
                         let stats = self.stats.get_mut(&task.sender.email).unwrap();
@@ -274,27 +335,56 @@ impl Queue {
                             stats.block();
                             stats.inc_bounced(1);
                             self.remove_receiver(&task.receiver);
-                            self.failed.push(task.receiver);
-                            continue;
-                        }
-                        match Queue::code_to_int(err.status()) {
-                            Some(code) => {
-                                if self.skip_codes.binary_search(&code).is_ok() {
-                                    stats.block();
-                                    stats.inc_bounced(1);
-                                    self.remove_receiver(&task.receiver);
+                            self.failures.push(task.receiver);
+
+                            if let Some(dash) = self.dashboard_config.as_ref() {
+                                websocket::Message::send_block(
+                                    outbound_tx,
+                                    dash.instance.clone(),
+                                    dash.user.clone(),
+                                    task.sender.email.clone(),
+                                );
+                            }
+                        } else if let Some(code) = Queue::code_to_int(err.status()) {
+                            if self.skip_codes.binary_search(&code).is_ok() {
+                                stats.block();
+                                stats.inc_bounced(1);
+                                self.remove_receiver(&task.receiver);
+                                self.failures.push(task.receiver);
+
+                                if let Some(dash) = self.dashboard_config.as_ref() {
+                                    websocket::Message::send_block(
+                                        outbound_tx,
+                                        dash.instance.clone(),
+                                        dash.user.clone(),
+                                        task.sender.email.clone(),
+                                    )
                                 }
                             }
-                            None => stats.inc_failed(1),
-                        };
-                        self.failed.push(task.receiver);
+                        }
+
+                        if let Some(dash) = self.dashboard_config.as_ref() {
+                            let stats = self.stats.get_mut(&task.sender.email).unwrap();
+                            match serde_json::to_string(&stats) {
+                                Ok(stats) => websocket::Message::send_sender_stats(
+                                    outbound_tx,
+                                    dash.instance.clone(),
+                                    dash.user.clone(),
+                                    stats,
+                                ),
+                                Err(err) => error!(
+                                    msg = "failed to send sender stats",
+                                    err = format!("{err}")
+                                ),
+                            };
+                        }
                     }
                     _ => return Err(err),
                 },
             }
         }
 
-        Ok(())
+        Ok(sent)
     }
 
     fn pos_min_timeout(&mut self, stack_size: usize) -> Option<usize> {
@@ -316,11 +406,12 @@ impl Queue {
             None => return None,
         };
 
-        match self.receivers.iter().position(|r| r.sender.eq(sender)) {
+        let sender = sender.to_owned();
+        match self.receivers.iter().position(|r| r.sender.eq(&sender)) {
             Some(p) => Some(p),
             None => {
-                self.senders.remove(sender);
-                return self.pos_min_timeout(stack_size);
+                self.stats.remove(&sender);
+                self.pos_min_timeout(stack_size + 1)
             }
         }
     }
@@ -343,13 +434,36 @@ impl Queue {
         span
     }
 
-    pub fn run(&mut self) {
+    pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let (inbound_tx, inbound_rx) = crossbeam_channel::unbounded();
+        let (outbound_tx, outbound_rx) = futures_channel::mpsc::unbounded();
+
+        if let Some(dash) = self.dashboard_config.as_mut() {
+            let ws_url = dash.host.replace("http", "ws");
+            let ib_tx = inbound_tx.clone();
+            let instance = dash.instance.clone();
+            tokio::spawn(async move {
+                websocket::connect_and_listen(
+                    format!("{}/ws/instances/{}", ws_url, instance),
+                    ib_tx,
+                    outbound_rx,
+                )
+                .await
+            });
+
+            if let Some(imap_user) = dash.unblocker_user.clone() {
+                let senders = self.senders.keys().map(|email| email.to_owned()).collect();
+
+                let i_tx = inbound_tx.clone();
+                thread::spawn(move || imap_user.query_block_status(senders, i_tx));
+            }
+        }
+
         self.start = Local::now();
         let (mut ptr, mut sent, mut skips) = (0, 0, 0);
         info!(msg = "starting queue", start = format!("{}", self.start));
 
         let progress = self.new_progress_span();
-
         let progress_enter = progress.enter();
         'main: loop {
             if self.skip_weekends {
@@ -359,12 +473,15 @@ impl Queue {
             let mut tasks: Vec<JoinHandle<task::TaskResult>> = Vec::new();
             for _ in 0..self.workers {
                 if self.receivers.is_empty() {
-                    info!(msg = "finished sending mails", total_sent = sent);
+                    info!(msg = "sent all emails", total_sent = sent);
                     break 'main;
                 }
 
                 if Queue::is_tomorrow(self.start) {
-                    info!(msg = "it is tomorrow", time = format!("{}", Local::now()));
+                    debug!(
+                        msg = "updated start time",
+                        time = format!("{}", Local::now())
+                    );
                     self.reset_daily_lim();
                 }
 
@@ -379,49 +496,42 @@ impl Queue {
                         );
                         self.senders.remove(&receiver.sender);
                         self.remove_receiver(&receiver);
-                        self.failed.push(receiver);
+                        self.failures.push(receiver);
                         ptr += 1;
                         continue;
                     }
                 };
 
                 if stat.is_blocked() {
-                    warn!(
+                    debug!(
                         msg = "skipping flagged sender",
                         sender = receiver.sender,
                         receiver = receiver.email,
                     );
 
-                    self.failed.push(receiver);
                     ptr += 1;
                     continue;
                 }
 
-                if stat.is_timed_out() {
-                    warn!(
-                        msg = "skipping timed-out sender",
-                        sender = receiver.sender,
-                        receiver = receiver.email
-                    );
-
-                    skips += 1;
-                    if skips >= self.receivers.len() {
-                        let timeout = stat.timeout.unwrap();
-                        let pos = self.pos_min_timeout(0);
-                        if let Some(pos) = pos {
-                            ptr = pos;
-                            let sender = &self.receivers[ptr].sender;
-                            let stat = self.stats.get_mut(&self.receivers[ptr].sender).unwrap();
-                            info!(msg = "got sender with least timeout", sender = sender);
-                            Queue::pause(stat.timeout.unwrap());
-                            continue;
-                        }
-                        Queue::pause(timeout);
-                        skips = 0;
+                if let Some(timeout) = stat.is_timed_out() {
+                    if skips < self.receivers.len() {
+                        skips += 1;
                         continue;
                     }
-                    ptr += 1;
-                    continue;
+                    skips = 0;
+                    let pos = self.pos_min_timeout(0);
+                    if let Some(pos) = pos {
+                        ptr = pos;
+                        let sender = &self.receivers[ptr].sender;
+                        let stat = self.stats.get_mut(&self.receivers[ptr].sender).unwrap();
+                        debug!(msg = "got sender with least timeout", sender = sender);
+                        if let Some(t) = stat.timeout {
+                            Queue::pause(t);
+                        }
+                        continue 'main;
+                    }
+                    Queue::pause(timeout);
+                    continue 'main;
                 }
 
                 if !Queue::is_tomorrow(self.start) && stat.today > self.daily_limit {
@@ -432,41 +542,122 @@ impl Queue {
                     );
                     stat.set_timeout(Duration::try_hours(24).unwrap());
                     ptr += 1;
-                    continue;
+                    continue 'main;
                 }
 
                 let sender = self.senders.get(&receiver.sender).unwrap();
                 let task = task::Task::new(sender.clone(), receiver);
 
-                tasks.push(task.spawn());
+                tasks.push(task.spawn(self.read_receipts));
 
                 stat.set_timeout(self.rate);
                 ptr += 1;
             }
 
-            let _sent = tasks.len();
-            self.collect_tasks(tasks).unwrap_or_else(|err| {
-                error!(
-                    msg = "failed to collect send results",
-                    err = format!("{err}")
-                )
-            });
+            let _sent = self.collect_tasks(tasks, &outbound_tx).unwrap_or(0);
 
             Span::current().pb_inc(_sent as u64);
             sent += _sent;
 
-            self.save_progress();
+            self.send_task_stats(sent, &outbound_tx);
+
+            self.read_messages(&inbound_rx, &outbound_tx);
+            if self.save_progress {
+                self.save_progress();
+            }
         }
 
         std::mem::drop(progress_enter);
         std::mem::drop(progress);
+
+        Ok(())
+    }
+
+    fn send_task_stats(&self, sent: usize, outbound_tx: &websocket::SocketChannelSender) {
+        if let Some(dash) = self.dashboard_config.as_ref() {
+            match serde_json::to_string(&sent) {
+                Ok(sent) => {
+                    websocket::Message::send_task_stats(
+                        outbound_tx,
+                        dash.instance.clone(),
+                        dash.user.clone(),
+                        sent,
+                    );
+                }
+                Err(err) => error!(msg = "failed to send task stats", err = format!("{err}")),
+            }
+        }
+    }
+
+    fn read_messages(
+        &mut self,
+        inbound_rx: &crossbeam_channel::Receiver<websocket::Message>,
+        outbound_tx: &websocket::SocketChannelSender,
+    ) {
+        debug!(msg = "reading inbound messages");
+        for _ in 0..inbound_rx.len() {
+            let message = match inbound_rx.recv() {
+                Ok(msg) => msg,
+                Err(err) => {
+                    error!(msg = "message read err", err = format!("{err}"));
+                    continue;
+                }
+            };
+
+            match message.kind {
+                websocket::MessageKind::Block => {
+                    if let Some(sender) = self.stats.get_mut(&message.data) {
+                        sender.block();
+                    }
+                }
+                websocket::MessageKind::Unblock => {
+                    if let Some(sender) = self.stats.get_mut(&message.data) {
+                        sender.unblock();
+                    }
+                }
+                websocket::MessageKind::Stop => {
+                    self.save_progress();
+                    warn!("received stop signal; stopping process.");
+                    process::exit(-1);
+                }
+                websocket::MessageKind::LocalBlock => {
+                    let data: websocket::LocalBlockBody = match serde_json::from_str(&message.data)
+                    {
+                        Ok(d) => d,
+                        Err(e) => {
+                            error!(msg = "local block serde err", err = format!("{e}"));
+                            continue;
+                        }
+                    };
+
+                    if let Some(stat) = self.stats.get_mut(&data.email) {
+                        stat.inc_bounced(data.amnt as u64);
+                        stat.block();
+                    }
+
+                    if let Some(dash) = self.dashboard_config.as_ref() {
+                        websocket::Message::send_block(
+                            outbound_tx,
+                            dash.instance.clone(),
+                            dash.user.clone(),
+                            data.email,
+                        );
+                    }
+                }
+                _ => continue,
+            }
+        }
     }
 
     fn save_progress(&self) {
         self.save_stats()
             .unwrap_or_else(|e| warn!(msg = "could not save statistics", error = format!("{e}")));
-        Queue::save_receivers(&self.receivers, "failed.csv")
-            .unwrap_or_else(|e| warn!(msg = "could not save failures", error = format!("{e}")));
+
+        Self::save_receivers(&self.failures, "failures.csv")
+            .unwrap_or_else(|e| warn!(msg = "could not save statistics", error = format!("{e}")));
+
+        Self::save_receivers(&self.receivers, "remaining.csv")
+            .unwrap_or_else(|e| warn!(msg = "could not save statistics", error = format!("{e}")));
     }
 
     fn code_to_int(code: Option<Code>) -> Option<u16> {

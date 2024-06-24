@@ -9,7 +9,10 @@ use lettre::{
     transport::smtp::{self, authentication::Credentials},
     Message, SmtpTransport, Transport,
 };
-use std::{sync::Arc, thread, thread::JoinHandle};
+use std::{
+    sync::Arc,
+    thread::{self, JoinHandle},
+};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -37,21 +40,17 @@ pub struct Task {
 
 pub type TaskResult = Result<Task, Error>;
 
-const DISPOSITION_HEADER: &'static str = "Disposition-Notification-To";
-const RETURN_RECEIPT_HEADER: &'static str = "Disposition-Notification-To";
+const RETURN_RECEIPT_HEADER: &str = "Return-Receipt-To";
+const DISPOSITION_HEADER: &str = "Disposition-Notification-To";
 
 impl Task {
     pub(super) fn new(sender: Arc<Sender>, receiver: Arc<Receiver>) -> Self {
         Task { sender, receiver }
     }
 
-    fn send(self) -> TaskResult {
+    fn send(self, read_receipts: bool) -> TaskResult {
         let (sender, receiver, empty) =
             (&self.sender, &self.receiver, TemplateVariables::default());
-        let transport = match create_transport(&sender) {
-            Ok(t) => t,
-            Err(err) => return Err(Error::TransportError { task: self, err }),
-        };
 
         let templates = sender.templates.as_ref().unwrap();
         let variables = &receiver.variables.as_ref().unwrap_or(&empty).0;
@@ -110,30 +109,30 @@ impl Task {
             }
         };
 
-        if let Some(read_receipts) = sender.read_receipt.as_ref() {
-            set_header(&mut msg, DISPOSITION_HEADER, read_receipts.clone());
-            set_header(&mut msg, RETURN_RECEIPT_HEADER, read_receipts.clone());
+        if read_receipts {
+            set_header(&mut msg, RETURN_RECEIPT_HEADER, sender.email.clone());
+            set_header(&mut msg, DISPOSITION_HEADER, sender.email.clone());
         }
 
-        match transport.send(&msg) {
+        let creds = Credentials::new(sender.email.clone(), sender.secret.clone());
+
+        let mailer = match SmtpTransport::starttls_relay(&sender.host) {
+            Ok(m) => m
+                .credentials(creds)
+                .authentication(vec![sender.auth])
+                .build(),
+            Err(err) => return Err(Error::TransportError { task: self, err }),
+        };
+
+        match mailer.send(&msg) {
             Ok(_) => Ok(self),
             Err(err) => Err(Error::SendError { task: self, err }),
         }
     }
 
-    pub(super) fn spawn(self) -> JoinHandle<TaskResult> {
-        thread::spawn(move || self.send())
+    pub(super) fn spawn(self, read_receipts: bool) -> JoinHandle<TaskResult> {
+        thread::spawn(move || self.send(read_receipts))
     }
-}
-
-fn create_transport(sender: &Arc<Sender>) -> core::result::Result<SmtpTransport, smtp::Error> {
-    Ok(SmtpTransport::relay(&sender.host)?
-        .credentials(Credentials::new(
-            sender.email.clone(),
-            sender.secret.clone(),
-        ))
-        .authentication(vec![sender.auth])
-        .build())
 }
 
 fn set_header(msg: &mut Message, name: &'static str, value: String) {

@@ -1,13 +1,13 @@
 use chrono::{DateTime, Duration, Local};
 use serde::Serialize;
+use tracing::debug;
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub(super) struct Stats {
-    pub(crate) sender: String,
+    pub(crate) email: String,
     pub(crate) today: u32,
     total: u64,
     bounced: u64,
-    failed: u64,
     blocked: bool,
     #[serde(skip_serializing)]
     pub(crate) timeout: Option<DateTime<Local>>,
@@ -16,11 +16,10 @@ pub(super) struct Stats {
 impl Stats {
     pub fn new(addr: String) -> Self {
         Self {
-            sender: addr,
+            email: addr,
             today: 0,
             total: 0,
             bounced: 0,
-            failed: 0,
             blocked: false,
             timeout: None,
         }
@@ -30,17 +29,14 @@ impl Stats {
         self.timeout = Some(Local::now() + dur);
     }
 
-    pub fn is_timed_out(&mut self) -> bool {
-        match self.timeout {
-            Some(t) => {
-                if Local::now().gt(&t) {
-                    self.timeout = None;
-                    return false;
-                }
-                true
+    pub fn is_timed_out(&mut self) -> Option<DateTime<Local>> {
+        if let Some(t) = self.timeout {
+            if Local::now().gt(&t) {
+                self.timeout = None;
             }
-            None => false,
         }
+
+        self.timeout
     }
 
     pub fn inc_sent(&mut self, amnt: u32) {
@@ -50,11 +46,6 @@ impl Stats {
 
     pub fn inc_bounced(&mut self, amnt: u64) {
         self.bounced += amnt;
-        self.failed += amnt;
-    }
-
-    pub fn inc_failed(&mut self, amnt: u64) {
-        self.failed += amnt;
     }
 
     pub fn reset_daily(&mut self) {
@@ -62,10 +53,16 @@ impl Stats {
     }
 
     pub fn block(&mut self) {
-        self.blocked = true
+        self.blocked = true;
+        debug!(msg = "blocked sender", sender = self.email)
     }
 
     pub fn is_blocked(&mut self) -> bool {
         self.blocked
+    }
+
+    pub fn unblock(&mut self) {
+        self.blocked = false;
+        debug!(msg = "unblocked sender", sender = self.email)
     }
 }

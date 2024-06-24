@@ -13,6 +13,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
 
+use crate::unblock_imap;
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("for file: '{file}'; err: {err}")]
@@ -153,7 +155,6 @@ pub struct Sender {
     pub host: String,
     pub auth: Mechanism,
     pub subject: String,
-    pub read_receipt: Option<String>,
     pub plain: PathBuf,
     pub html: Option<PathBuf>,
     #[serde(skip_serializing, skip_deserializing)]
@@ -168,7 +169,6 @@ impl Default for Sender {
             subject: "".into(),
             host: "".into(),
             auth: Mechanism::Plain,
-            read_receipt: None,
             plain: PathBuf::new(),
             html: None,
             templates: None,
@@ -204,7 +204,7 @@ impl Sender {
                         })?,
                     )
                     .map_err(|err| Error::TemplateError {
-                        src: self.plain.to_str().unwrap_or("plaintext file").into(),
+                        src: html.to_str().unwrap_or("md file").into(),
                         err,
                     })?,
 
@@ -212,7 +212,7 @@ impl Sender {
                     templates
                         .register_template_file("html", html)
                         .map_err(|err| Error::TemplateError {
-                            src: self.plain.to_str().unwrap_or("plaintext file").into(),
+                            src: html.to_str().unwrap_or("html file").into(),
                             err,
                         })?
                 }
@@ -257,6 +257,27 @@ impl PartialEq for Sender {
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DashboardConfig {
+    pub host: String,
+    pub api_key: String,
+    pub user: String,
+    pub instance: String,
+    pub unblocker_user: Option<unblock_imap::UnblockIMAPUser>,
+}
+
+impl Default for DashboardConfig {
+    fn default() -> Self {
+        Self {
+            host: "".into(),
+            api_key: "".into(),
+            user: "".into(),
+            instance: "".into(),
+            unblocker_user: None,
+        }
+    }
+}
+
 pub type Senders = Vec<Arc<Sender>>;
 pub type Receivers = Vec<Arc<Receiver>>;
 
@@ -272,66 +293,4 @@ where
             Err(e) => Err(e),
         })
         .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{fs, str::FromStr};
-
-    use super::*;
-
-    #[test]
-    fn test_read_input() -> Result<(), csv::Error> {
-        let senders = read_input::<Sender>(&"../../examples/senders.example.csv".parse().unwrap())?;
-
-        assert_eq!(senders.len(), 10);
-        assert_eq!(
-            senders[2],
-            Sender {
-                email: "alexander@mail.com".into(),
-                secret: "Password123".into(),
-                host: "smtp.mail.com".into(),
-                auth: Mechanism::Login,
-                subject: "This is a test email for you {{name}}".into(),
-                read_receipt: None,
-                plain: "/home/sheke/Code/hermes/examples/text_message.example.txt"
-                    .parse()
-                    .unwrap(),
-                html: Some(
-                    "/home/sheke/Code/hermes/examples/html_message.example.html"
-                        .parse()
-                        .unwrap()
-                ),
-                templates: None
-            }
-            .into()
-        );
-
-        let receivers =
-            read_input::<Receiver>(&"../../examples/receivers.example.csv".parse().unwrap())?;
-
-        assert_eq!(receivers.len(), 11);
-        assert_eq!(
-            receivers[5],
-            Receiver {
-                email: "tom@example.com".into(),
-                cc: Some(Mailboxes::from_str("mark@example.com,sarah@example.com").unwrap()),
-                bcc: Some(Mailboxes::from_str("emma@example.com,john@example.com").unwrap()),
-                sender: "sarah.wilson@example.com".into(),
-                variables: Some(TemplateVariables(HashMap::from([
-                    ("name".to_string(), "Tom".to_string()),
-                    ("location".to_string(), "Berlin".to_string())
-                ])))
-            }
-            .into()
-        );
-
-        Ok(())
-    }
-
-    fn test_template_vars() -> Result<(), Box<dyn std::error::Error>> {
-        let test_data = fs::read_to_string("../../testdata/template_vars.txt")?;
-
-        Ok(())
-    }
 }
