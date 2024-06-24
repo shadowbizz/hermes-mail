@@ -1,10 +1,10 @@
 use clap::{ArgAction::SetTrue, Args, Parser, Subcommand};
 use dialoguer::{Confirm, Input, MultiSelect, Select};
 use hermes_csv::{Reader, ReceiverHeaderMap, SenderHeaderMap};
-use hermes_mailer::{data::CodesVec, queue::Builder};
 use lettre::transport::smtp::authentication::Mechanism;
-use serde::Deserialize;
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
+
+pub mod config;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -12,6 +12,12 @@ use std::{fs, path::PathBuf};
 pub struct Cmd {
     #[command(subcommand)]
     pub command: Commands,
+    /// Enable pretty logging
+    #[arg(long, value_name = "BOOL",  action = SetTrue, global = true)]
+    pub pretty: Option<bool>,
+    /// Specify logging level (0-4)
+    #[arg(short, long, value_name = "NUMBER", global = true)]
+    pub log_level: Option<u8>,
 }
 
 #[derive(Subcommand)]
@@ -22,83 +28,17 @@ pub enum Commands {
     Convert(ConvertCommand),
 }
 
-#[derive(Args, Deserialize)]
+#[derive(Args)]
 pub struct SendCommand {
-    /// Path to send configuration file
+    /// Path to file containing mailer config
     #[arg(short, long, value_name = "FILE")]
-    pub config: Option<PathBuf>,
-    /// Path to file containing senders and their info
-    #[arg(short, long, value_name = "FILE", required_unless_present("config"))]
-    pub senders: Option<PathBuf>,
-    /// Path to file containing receivers and their info
-    #[arg(short, long, value_name = "FILE", required_unless_present("config"))]
-    pub receivers: Option<PathBuf>,
-    /// Path to folder containing email message files
-    #[arg(long, value_name = "PATH")]
-    pub content: Option<PathBuf>,
-    /// Sets the number of workers that will send email simultaneously
-    #[arg(short, long, value_name = "NUMBER")]
-    pub workers: Option<u8>,
-    /// Sets the interval (in seconds) between each sender action
-    #[arg(long, value_name = "NUMBER")]
-    pub rate: Option<i64>,
-    /// Sets the daily limit of emails that will be sent per sender
-    #[arg(long, value_name = "NUMBER")]
-    pub daily_rate: Option<u32>,
-    /// Skip sending emails on the weekends
-    #[arg(long, action = SetTrue)]
-    pub skip_weekends: Option<bool>,
-    /// Skip senders that have received prior permanent SMTP codes
-    #[arg(long, action = SetTrue)]
-    pub skip_permanent: Option<bool>,
-    /// Skip senders which encounter the specified codes
-    #[arg(long, value_name = "LIST", value_parser = clap::value_parser!(CodesVec))]
-    pub skip_codes: Option<CodesVec>,
+    pub config: PathBuf,
 }
 
 impl SendCommand {
-    pub(crate) fn send(mut self) -> Result<(), super::Error> {
-        if let Some(config) = self.config {
-            let data = fs::read_to_string(config)?;
-            self = toml::from_str(&data)?;
-            if self.senders.is_none() || self.receivers.is_none() {
-                return Err("Missing either senders or receivers".into());
-            }
-        }
-
-        let mut builder = Builder::new()
-            .senders(self.senders.unwrap().clone())
-            .receivers(self.receivers.unwrap().clone())
-            .skip_codes(self.skip_codes.clone().unwrap_or_default());
-
-        if let Some(content) = self.content {
-            builder = builder.content(content);
-        }
-
-        if let Some(workers) = self.workers {
-            builder = builder.workers(workers)
-        }
-
-        if let Some(rate) = self.rate {
-            builder = builder.rate(rate)
-        }
-
-        if let Some(rate) = self.daily_rate {
-            builder = builder.daily_rate(rate)
-        }
-
-        if self.skip_weekends.unwrap_or(false) {
-            builder = builder.skip_weekends()
-        }
-
-        if self.skip_permanent.unwrap_or(false) {
-            builder = builder.skip_weekends()
-        }
-
-        let mut q = builder.build()?;
-        q.run();
-
-        Ok(())
+    pub(crate) async fn send(self) -> Result<(), super::StdError> {
+        let cfg = config::Config::new(self.config)?;
+        cfg.run().await
     }
 }
 
@@ -120,7 +60,7 @@ pub struct ConvertCommand {
 }
 
 impl ConvertCommand {
-    fn receiver_prompt(self, mut reader: Reader) -> Result<(), super::Error> {
+    fn receiver_prompt(self, mut reader: Reader) -> Result<(), super::StdError> {
         let mut map = ReceiverHeaderMap::new();
 
         map = map.email(
@@ -179,7 +119,7 @@ impl ConvertCommand {
         }
     }
 
-    fn sender_prompt(self, mut reader: Reader) -> Result<(), super::Error> {
+    fn sender_prompt(self, mut reader: Reader) -> Result<(), super::StdError> {
         let mut map = SenderHeaderMap::new();
 
         map = map.email(
@@ -273,7 +213,7 @@ impl ConvertCommand {
         reader.convert_senders(map, self.output)
     }
 
-    pub(crate) fn convert(self) -> Result<(), super::Error> {
+    pub(crate) fn convert(self) -> Result<(), super::StdError> {
         let reader = if self.sanitize {
             Reader::new_sanitized(&self.file).unwrap()
         } else {
